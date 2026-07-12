@@ -115,6 +115,12 @@ func (hs *clientHandshakeStateTLS13) handshake() error {
 		}
 	}
 
+	// JLS BEGIN: authenticate ShadowQUIC JLS ServerHello before hashing it.
+	if err := c.authenticateJLSServerHello(hs.serverHello); err != nil {
+		return err
+	}
+	// JLS END
+
 	if err := transcriptMsg(hs.serverHello, hs.transcript); err != nil {
 		return err
 	}
@@ -331,6 +337,14 @@ func (hs *clientHandshakeStateTLS13) processHelloRetryRequest() error {
 		// Do not send the fallback ECDH key share in a HRR response.
 		hello.keyShares = hello.keyShares[:1]
 	}
+
+	// JLS BEGIN: rustls-jls regenerates authentication for the second ClientHello.
+	if c.config.jlsClientConfig() != nil {
+		if err := c.applyJLSClientHelloRandom(hello); err != nil {
+			return err
+		}
+	}
+	// JLS END
 
 	if len(hello.pskIdentities) > 0 {
 		pskSuite := cipherSuiteTLS13ByID(hs.session.cipherSuite)
@@ -649,6 +663,13 @@ func (hs *clientHandshakeStateTLS13) readServerCertificate() error {
 		c.sendAlert(alertUnexpectedMessage)
 		return unexpectedMessageError(certVerify, msg)
 	}
+
+	// JLS BEGIN: JLS-authenticated camouflage certificates skip signature validation.
+	if c.jlsAuthenticated() {
+		c.peerSigAlg = certVerify.signatureAlgorithm
+		return transcriptMsg(certVerify, hs.transcript)
+	}
+	// JLS END
 
 	// See RFC 8446, Section 4.4.3.
 	// We don't use hs.hello.supportedSignatureAlgorithms because it might

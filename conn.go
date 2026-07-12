@@ -72,6 +72,10 @@ type Conn struct {
 	// or sending NewSessionTicket messages.
 	resumptionSecret []byte
 	echAccepted      bool
+	// JLS BEGIN: per-connection ShadowQUIC JLS state.
+	jlsState jlsState
+	jlsUser  JLSUser
+	// JLS END
 
 	// ticketKeys is the set of active session ticket keys for this
 	// connection. The first one is used to encrypt new tickets and
@@ -1650,6 +1654,12 @@ func (c *Conn) connectionStateLocked() ConnectionState {
 		state.ekm = c.ekm
 	}
 	state.ECHAccepted = c.echAccepted
+	// JLS BEGIN: report authenticated ShadowQUIC JLS user through ConnectionState.
+	state.JLS.Authenticated = c.jlsAuthenticated()
+	if state.JLS.Authenticated {
+		state.JLS.User = c.jlsUser.Username
+	}
+	// JLS END
 	return state
 }
 

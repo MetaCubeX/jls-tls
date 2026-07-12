@@ -314,6 +314,10 @@ type ConnectionState struct {
 	// client side.
 	ECHAccepted bool
 
+	// JLS BEGIN: expose ShadowQUIC JLS authentication state.
+	JLS JLSState
+	// JLS END
+
 	// HelloRetryRequest indicates whether we sent a HelloRetryRequest if we
 	// are a server, or if we received a HelloRetryRequest if we are a client.
 	HelloRetryRequest bool
@@ -900,6 +904,10 @@ type Config struct {
 	// clients, see the EncryptedClientHelloConfigList field.
 	EncryptedClientHelloKeys []EncryptedClientHelloKey
 
+	// JLS BEGIN: ShadowQUIC JLS configuration hook.
+	JLSConfig *JLSConfig
+	// JLS END
+
 	// mutex protects sessionTicketKeys and autoSessionTicketKeys.
 	mutex sync.RWMutex
 	// sessionTicketKeys contains zero or more ticket keys. If set, it means
@@ -1034,6 +1042,9 @@ func (c *Config) Clone() *Config {
 		EncryptedClientHelloKeys:            c.EncryptedClientHelloKeys,
 		sessionTicketKeys:                   c.sessionTicketKeys,
 		autoSessionTicketKeys:               c.autoSessionTicketKeys,
+		// JLS BEGIN: preserve ShadowQUIC JLS configuration on clone.
+		JLSConfig: c.JLSConfig,
+		// JLS END
 	}
 }
 

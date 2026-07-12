@@ -144,6 +144,12 @@ func (hs *serverHandshakeStateTLS13) processClientHello() error {
 		return errors.New("tls: TLS 1.3 client supports illegal compression methods")
 	}
 
+	// JLS BEGIN: authenticate ShadowQUIC JLS ClientHello before producing ServerHello.
+	if err := c.authenticateJLSClientHello(hs.clientHello); err != nil {
+		return err
+	}
+	// JLS END
+
 	hs.hello.random = make([]byte, 32)
 	if _, err := io.ReadFull(c.config.rand(), hs.hello.random); err != nil {
 		c.sendAlert(alertInternalError)
@@ -642,7 +648,17 @@ func (hs *serverHandshakeStateTLS13) doHelloRetryRequest(selectedGroup CurveID) 
 		return nil, errors.New("tls: client indicated early data in second ClientHello")
 	}
 
-	if illegalClientHelloChange(clientHello, hs.clientHello) {
+	// JLS BEGIN: authenticate rustls-jls's regenerated second ClientHello random.
+	allowRandomChange := false
+	if c.config.jlsServerConfig() != nil {
+		if err := c.authenticateJLSClientHello(clientHello); err != nil {
+			return nil, err
+		}
+		allowRandomChange = c.jlsAuthenticated()
+	}
+	// JLS END
+
+	if illegalClientHelloChange(clientHello, hs.clientHello, allowRandomChange) {
 		c.sendAlert(alertIllegalParameter)
 		return nil, errors.New("tls: client illegally modified second ClientHello")
 	}
@@ -655,7 +671,7 @@ func (hs *serverHandshakeStateTLS13) doHelloRetryRequest(selectedGroup CurveID) 
 // illegalClientHelloChange reports whether the two ClientHello messages are
 // different, with the exception of the changes allowed before and after a
 // HelloRetryRequest. See RFC 8446, Section 4.1.2.
-func illegalClientHelloChange(ch, ch1 *clientHelloMsg) bool {
+func illegalClientHelloChange(ch, ch1 *clientHelloMsg, allowRandomChange bool) bool {
 	if len(ch.supportedVersions) != len(ch1.supportedVersions) ||
 		len(ch.cipherSuites) != len(ch1.cipherSuites) ||
 		len(ch.supportedCurves) != len(ch1.supportedCurves) ||
@@ -695,7 +711,7 @@ func illegalClientHelloChange(ch, ch1 *clientHelloMsg) bool {
 		}
 	}
 	return ch.vers != ch1.vers ||
-		!bytes.Equal(ch.random, ch1.random) ||
+		(!allowRandomChange && !bytes.Equal(ch.random, ch1.random)) ||
 		!bytes.Equal(ch.sessionId, ch1.sessionId) ||
 		!bytes.Equal(ch.compressionMethods, ch1.compressionMethods) ||
 		ch.serverName != ch1.serverName ||
@@ -712,6 +728,22 @@ func illegalClientHelloChange(ch, ch1 *clientHelloMsg) bool {
 
 func (hs *serverHandshakeStateTLS13) sendServerParameters() error {
 	c := hs.c
+
+	// JLS BEGIN: replace ServerHello random with ShadowQUIC JLS authentication bytes.
+	if c.jlsAuthenticated() {
+		authData, err := jlsServerHelloAuthData(hs.hello)
+		if err != nil {
+			c.sendAlert(alertInternalError)
+			return err
+		}
+		fakeRandom, err := jlsBuildFakeRandom(c.jlsUser, hs.hello.random[:16], authData)
+		if err != nil {
+			c.sendAlert(alertInternalError)
+			return err
+		}
+		hs.hello.random = fakeRandom
+	}
+	// JLS END
 
 	if hs.echContext != nil {
 		copy(hs.hello.random[32-8:], make([]byte, 8))
