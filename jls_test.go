@@ -161,6 +161,49 @@ func TestJLSClientFallsBackToTLS(t *testing.T) {
 	}
 }
 
+func TestJLSTCPServerSuppressesUnauthenticatedAlerts(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		enableJLS  bool
+		wantWrites bool
+	}{
+		{name: "ordinary TLS", wantWrites: true},
+		{name: "JLS TCP server", enableJLS: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			clientConn, serverConn := localPipe(t)
+			serverWriteCounter := &writeCountingConn{Conn: serverConn}
+
+			clientConfig := testConfig.Clone()
+			clientConfig.MaxVersion = VersionTLS12
+			clientDone := make(chan error, 1)
+			go func() {
+				clientDone <- Client(clientConn, clientConfig).Handshake()
+			}()
+
+			serverConfig := testConfig.Clone()
+			serverConfig.MinVersion = VersionTLS13
+			if test.enableJLS {
+				serverConfig.JLSConfig = &JLSConfig{
+					Enable: true,
+					Users:  []JLSUser{{Username: "user", Password: "password"}},
+				}
+			}
+			serverErr := Server(serverWriteCounter, serverConfig).Handshake()
+			_ = serverConn.Close()
+			clientErr := <-clientDone
+			_ = clientConn.Close()
+
+			if serverErr == nil || clientErr == nil {
+				t.Fatalf("handshake errors: server=%v client=%v", serverErr, clientErr)
+			}
+			if gotWrites := serverWriteCounter.numWrites > 0; gotWrites != test.wantWrites {
+				t.Fatalf("server wrote during rejected handshake = %v, want %v", gotWrites, test.wantWrites)
+			}
+		})
+	}
+}
+
 func TestJLSAuthenticatedHandshakeSkipsCertificateVerification(t *testing.T) {
 	user := JLSUser{Username: "user", Password: "password"}
 	clientConfig := testConfig.Clone()

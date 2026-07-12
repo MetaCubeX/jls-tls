@@ -853,6 +853,14 @@ func (c *Conn) sendAlertLocked(err alert) error {
 	if c.quic != nil {
 		return c.out.setErrorLocked(&net.OpError{Op: "local error", Err: err})
 	}
+	// JLS BEGIN: keep unauthenticated TCP handshakes silent for transparent fallback.
+	if c.suppressJLSUnauthenticatedAlerts() {
+		if err == alertCloseNotify {
+			return nil
+		}
+		return c.out.setErrorLocked(&net.OpError{Op: "local error", Err: err})
+	}
+	// JLS END
 
 	switch err {
 	case alertNoRenegotiation, alertCloseNotify:

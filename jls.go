@@ -77,6 +77,11 @@ func (c *Conn) jlsAuthenticated() bool {
 	return c.jlsState == jlsStateAuthSuccess
 }
 
+func (c *Conn) suppressJLSUnauthenticatedAlerts() bool {
+	cfg := c.config.jlsServerConfig()
+	return !c.isClient && c.quic == nil && cfg != nil && !c.jlsAuthenticated()
+}
+
 func jlsBuildFakeRandom(user JLSUser, random16, authData []byte) ([]byte, error) {
 	if len(random16) != jlsRandomSeedLen {
 		return nil, errors.New("tls: jls random seed must be 16 bytes")
