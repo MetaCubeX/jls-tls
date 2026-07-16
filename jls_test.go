@@ -1,34 +1,42 @@
 package tls
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"errors"
 	"testing"
 )
 
-func TestJLSServerHelloExtensionOrderMatchesRustls(t *testing.T) {
-	message, err := testJLSServerHello().marshalForJLS()
+func TestJLSServerHelloAuthDataUsesWireEncoding(t *testing.T) {
+	hello := testJLSServerHello()
+	for i := range hello.random {
+		hello.random[i] = byte(i + 1)
+	}
+	wire, err := hello.marshal()
 	if err != nil {
 		t.Fatal(err)
 	}
-	checkServerHelloExtensionOrder(t, message, []uint16{
-		extensionKeyShare,
-		extensionPreSharedKey,
-		extensionSupportedVersions,
-	})
-}
+	wire = swapFirstTwoServerHelloExtensions(t, wire)
 
-func TestServerHelloMarshalKeepsStandardExtensionOrder(t *testing.T) {
-	message, err := testJLSServerHello().marshal()
+	received := new(serverHelloMsg)
+	if !received.unmarshal(wire) {
+		t.Fatal("failed to unmarshal test ServerHello")
+	}
+	original := append([]byte(nil), wire...)
+
+	got, err := jlsServerHelloAuthData(received)
 	if err != nil {
 		t.Fatal(err)
 	}
-	checkServerHelloExtensionOrder(t, message, []uint16{
-		extensionSupportedVersions,
-		extensionKeyShare,
-		extensionPreSharedKey,
-	})
+	want := append([]byte(nil), wire...)
+	jlsZero(want[jlsHelloRandomOffset : jlsHelloRandomOffset+jlsHelloRandomLen])
+	if !bytes.Equal(got, want) {
+		t.Fatal("JLS ServerHello authentication data did not preserve wire encoding")
+	}
+	if !bytes.Equal(received.original, original) {
+		t.Fatal("JLS ServerHello authentication modified original wire encoding")
+	}
 }
 
 func testJLSServerHello() *serverHelloMsg {
@@ -44,29 +52,37 @@ func testJLSServerHello() *serverHelloMsg {
 	}
 }
 
-func checkServerHelloExtensionOrder(t *testing.T, message []byte, want []uint16) {
+func swapFirstTwoServerHelloExtensions(t *testing.T, message []byte) []byte {
 	t.Helper()
 	offset := jlsHelloRandomOffset + jlsHelloRandomLen
+	if len(message) <= offset {
+		t.Fatal("test ServerHello is too short")
+	}
 	sessionIDLen := int(message[offset])
 	offset += 1 + sessionIDLen + 2 + 1
+	if len(message) < offset+2 {
+		t.Fatal("test ServerHello has no extensions")
+	}
 	extensionsLen := int(binary.BigEndian.Uint16(message[offset : offset+2]))
 	offset += 2
 	end := offset + extensionsLen
+	if end > len(message) || offset+4 > end {
+		t.Fatal("test ServerHello has malformed extensions")
+	}
+	firstEnd := offset + 4 + int(binary.BigEndian.Uint16(message[offset+2:offset+4]))
+	if firstEnd+4 > end {
+		t.Fatal("test ServerHello has fewer than two extensions")
+	}
+	secondEnd := firstEnd + 4 + int(binary.BigEndian.Uint16(message[firstEnd+2:firstEnd+4]))
+	if secondEnd > end {
+		t.Fatal("test ServerHello has malformed second extension")
+	}
 
-	var got []uint16
-	for offset < end {
-		got = append(got, binary.BigEndian.Uint16(message[offset:offset+2]))
-		extensionLen := int(binary.BigEndian.Uint16(message[offset+2 : offset+4]))
-		offset += 4 + extensionLen
-	}
-	if len(got) != len(want) {
-		t.Fatalf("ServerHello extensions = %#v, want %#v", got, want)
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Fatalf("ServerHello extensions = %#v, want %#v", got, want)
-		}
-	}
+	result := append([]byte(nil), message[:offset]...)
+	result = append(result, message[firstEnd:secondEnd]...)
+	result = append(result, message[offset:firstEnd]...)
+	result = append(result, message[secondEnd:]...)
+	return result
 }
 
 func TestJLSHandshake(t *testing.T) {

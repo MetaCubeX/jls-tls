@@ -6,8 +6,6 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"errors"
-
-	"golang.org/x/crypto/cryptobyte"
 )
 
 // JLS BEGIN: ShadowQUIC JLS authentication and camouflage support.
@@ -209,123 +207,18 @@ func (c *Conn) authenticateJLSServerHello(serverHello *serverHelloMsg) error {
 	return nil
 }
 
-// marshalForJLS returns the canonical ServerHello encoding used as JLS
-// authentication data. TLS does not assign meaning to the order of extensions,
-// but JLS authenticates the serialized message (with random zeroed by the
-// caller), so both peers must produce byte-for-byte identical encodings.
-//
-// rustls decodes a received ServerHello and re-encodes ServerExtensions in its
-// struct declaration order: key_share, pre_shared_key, supported_versions. Go
-// normally marshals those fields as supported_versions, key_share,
-// pre_shared_key. Authenticating Go's normal encoding directly would therefore
-// break both Go-to-rustls and rustls-to-Go JLS handshakes.
-//
-// Go-to-Go remains compatible because authentication encoding is separate from
-// wire encoding:
-//   - the Go server canonicalizes its ServerHello fields here, zeros random in
-//     jlsServerHelloAuthData, and uses those bytes to build the fake random;
-//   - it then sends the ServerHello with the normal Go marshal order;
-//   - the Go client parses those wire bytes into serverHelloMsg fields, calls
-//     this method to recreate the same canonical bytes, zeros random, and
-//     verifies the fake random.
-//
-// The server and client therefore authenticate identical canonical bytes even
-// though the wire uses Go's normal order. The TLS transcript is also unchanged:
-// the server hashes its normal marshal output, while the client hashes the
-// stored original wire bytes, which are the exact bytes sent by the server.
-//
-// This conversion is deliberately isolated from serverHelloMsg.marshal. The
-// normal marshal order and the original wire bytes must remain unchanged for
-// TLS transcript hashing and non-JLS handshakes. Starting with the normal
-// encoding here also preserves every non-JLS field and extension payload.
-func (m *serverHelloMsg) marshalForJLS() ([]byte, error) {
-	msg, err := m.marshal()
-	if err != nil {
-		return nil, err
-	}
-
-	// Parse the complete ServerHello structure instead of relying on fixed byte
-	// offsets. The extension slices below continue to reference msg.
-	s := cryptobyte.String(msg)
-	var messageType, compressionMethod uint8
-	var legacyVersion, cipherSuite uint16
-	var body, sessionID, extensions cryptobyte.String
-	var random []byte
-	if !s.ReadUint8(&messageType) ||
-		messageType != typeServerHello ||
-		!s.ReadUint24LengthPrefixed(&body) ||
-		!s.Empty() ||
-		!body.ReadUint16(&legacyVersion) ||
-		!body.ReadBytes(&random, jlsHelloRandomLen) ||
-		!body.ReadUint8LengthPrefixed(&sessionID) ||
-		!body.ReadUint16(&cipherSuite) ||
-		!body.ReadUint8(&compressionMethod) ||
-		!body.ReadUint16LengthPrefixed(&extensions) ||
-		!body.Empty() {
-		return nil, errors.New("tls: invalid JLS server hello")
-	}
-
-	type extension struct {
-		typeID uint16
-		wire   []byte
-	}
-	extensionBytes := extensions
-	parsed := make([]extension, 0, 3)
-	for len(extensions) > 0 {
-		remaining := extensions
-		var typeID uint16
-		var data cryptobyte.String
-		if !extensions.ReadUint16(&typeID) || !extensions.ReadUint16LengthPrefixed(&data) {
-			return nil, errors.New("tls: invalid JLS server hello extensions")
-		}
-		wireLen := len(remaining) - len(extensions)
-		parsed = append(parsed, extension{typeID: typeID, wire: remaining[:wireLen]})
-	}
-
-	// These are the only extensions whose relative order differs between the
-	// valid TLS 1.3 JLS ServerHello encodings produced by Go and rustls.
-	canonicalTypes := [...]uint16{
-		extensionKeyShare,
-		extensionPreSharedKey,
-		extensionSupportedVersions,
-	}
-	canonical := make(map[uint16][]byte, len(canonicalTypes))
-	for _, ext := range parsed {
-		for _, typeID := range canonicalTypes {
-			if ext.typeID == typeID {
-				canonical[typeID] = ext.wire
-				break
-			}
-		}
-	}
-
-	// Replace the canonical extensions at their first original position. Every
-	// extension frame is reused verbatim and the total size is unchanged, so the
-	// existing handshake and extension length prefixes remain valid. Unrelated
-	// extensions retain their original relative order.
-	extensionOffset := len(msg) - len(extensionBytes)
-	result := append([]byte(nil), msg[:extensionOffset]...)
-	canonicalWritten := false
-	for _, ext := range parsed {
-		if _, ok := canonical[ext.typeID]; ok {
-			if !canonicalWritten {
-				for _, typeID := range canonicalTypes {
-					result = append(result, canonical[typeID]...)
-				}
-				canonicalWritten = true
-			}
-			continue
-		}
-		result = append(result, ext.wire...)
-	}
-	return result, nil
-}
-
 func jlsServerHelloAuthData(hello *serverHelloMsg) ([]byte, error) {
-	msg, err := hello.marshalForJLS()
-	if err != nil {
-		return nil, err
+	var wire []byte
+	if hello.original != nil {
+		wire = hello.original
+	} else {
+		var err error
+		wire, err = hello.marshal()
+		if err != nil {
+			return nil, err
+		}
 	}
+	msg := append([]byte(nil), wire...)
 	if len(msg) < jlsHelloRandomOffset+jlsHelloRandomLen {
 		return nil, errors.New("tls: jls server hello too short")
 	}
