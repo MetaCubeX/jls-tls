@@ -106,7 +106,7 @@ func TestJLSHandshake(t *testing.T) {
 		t.Fatalf("JLS negotiated versions: server=%#x client=%#x", serverState.Version, clientState.Version)
 	}
 	for side, state := range map[string]ConnectionState{"server": serverState, "client": clientState} {
-		if !state.JLS.Authenticated || state.JLS.User != user.Username {
+		if state.JLS.Status != JLSAuthenticated || state.JLS.User != user.Username {
 			t.Fatalf("%s JLS state = %+v, want authenticated user %q", side, state.JLS, user.Username)
 		}
 	}
@@ -159,7 +159,7 @@ func TestJLSClientFallsBackToTLS(t *testing.T) {
 	verifierCalled := false
 	clientConfig.VerifyConnection = func(state ConnectionState) error {
 		verifierCalled = true
-		if state.JLS.Authenticated {
+		if state.JLS.Status == JLSAuthenticated {
 			return errors.New("ordinary TLS server reported authenticated JLS state")
 		}
 		return nil
@@ -172,7 +172,10 @@ func TestJLSClientFallsBackToTLS(t *testing.T) {
 	if !verifierCalled {
 		t.Fatal("ordinary TLS fallback skipped VerifyConnection")
 	}
-	if serverState.JLS.Authenticated || clientState.JLS.Authenticated {
+	if serverState.JLS.Status != JLSDisabled {
+		t.Fatalf("ordinary TLS server reported JLS state: %+v", serverState.JLS)
+	}
+	if clientState.JLS.Status != JLSUnauthenticated {
 		t.Fatalf("ordinary TLS fallback reported JLS authentication: server=%+v client=%+v", serverState.JLS, clientState.JLS)
 	}
 }
@@ -246,7 +249,7 @@ func TestJLSAuthenticatedHandshakeSkipsCertificateVerification(t *testing.T) {
 	if verifierCalled {
 		t.Fatal("JLS-authenticated handshake called VerifyConnection")
 	}
-	if !serverState.JLS.Authenticated || !clientState.JLS.Authenticated {
+	if serverState.JLS.Status != JLSAuthenticated || clientState.JLS.Status != JLSAuthenticated {
 		t.Fatalf("JLS authentication state: server=%+v client=%+v", serverState.JLS, clientState.JLS)
 	}
 }
@@ -268,10 +271,10 @@ func TestJLSHelloRetryRequest(t *testing.T) {
 		if !serverState.HelloRetryRequest || !clientState.HelloRetryRequest {
 			t.Fatal("JLS handshake did not exercise HelloRetryRequest")
 		}
-		if !serverState.JLS.Authenticated || serverState.JLS.User != user.Username {
+		if serverState.JLS.Status != JLSAuthenticated || serverState.JLS.User != user.Username {
 			t.Fatalf("server JLS state = %+v, want authenticated user %q", serverState.JLS, user.Username)
 		}
-		if !clientState.JLS.Authenticated || clientState.JLS.User != user.Username {
+		if clientState.JLS.Status != JLSAuthenticated || clientState.JLS.User != user.Username {
 			t.Fatalf("client JLS state = %+v, want authenticated user %q", clientState.JLS, user.Username)
 		}
 	})
@@ -310,7 +313,7 @@ func TestJLSHelloRetryRequest(t *testing.T) {
 		if !clientState.DidResume || !clientState.HelloRetryRequest || !serverState.HelloRetryRequest {
 			t.Fatalf("resumed HRR state: client=%+v server=%+v", clientState, serverState)
 		}
-		if !clientState.JLS.Authenticated || !serverState.JLS.Authenticated {
+		if clientState.JLS.Status != JLSAuthenticated || serverState.JLS.Status != JLSAuthenticated {
 			t.Fatalf("JLS authentication state: client=%+v server=%+v", clientState.JLS, serverState.JLS)
 		}
 	})

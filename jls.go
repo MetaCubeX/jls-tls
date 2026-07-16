@@ -29,10 +29,19 @@ type JLSConfig struct {
 	ServerName string
 }
 
+// JLSStatus reports ShadowQUIC JLS authentication status for a connection.
+type JLSStatus uint8
+
+const (
+	JLSDisabled JLSStatus = iota
+	JLSUnauthenticated
+	JLSAuthenticated
+)
+
 // JLSState reports ShadowQUIC JLS authentication state for a connection.
 type JLSState struct {
-	Authenticated bool
-	User          string
+	Status JLSStatus
+	User   string
 }
 
 type jlsState uint8
@@ -57,14 +66,7 @@ var ErrJLSAuthFailed = errors.New("tls: jls authentication failed")
 
 var errJLSAuthFailed = ErrJLSAuthFailed
 
-func (c *Config) jlsClientConfig() *JLSConfig {
-	if c == nil || c.JLSConfig == nil || !c.JLSConfig.Enable {
-		return nil
-	}
-	return c.JLSConfig
-}
-
-func (c *Config) jlsServerConfig() *JLSConfig {
+func (c *Config) jlsConfig() *JLSConfig {
 	if c == nil || c.JLSConfig == nil || !c.JLSConfig.Enable {
 		return nil
 	}
@@ -75,8 +77,18 @@ func (c *Conn) jlsAuthenticated() bool {
 	return c.jlsState == jlsStateAuthSuccess
 }
 
+func (c *Conn) jlsStatus() JLSStatus {
+	if c.config.jlsConfig() == nil {
+		return JLSDisabled
+	}
+	if c.jlsAuthenticated() {
+		return JLSAuthenticated
+	}
+	return JLSUnauthenticated
+}
+
 func (c *Conn) suppressJLSUnauthenticatedAlerts() bool {
-	cfg := c.config.jlsServerConfig()
+	cfg := c.config.jlsConfig()
 	return !c.isClient && c.quic == nil && cfg != nil && !c.jlsAuthenticated()
 }
 
@@ -135,7 +147,7 @@ func (c *Conn) applyJLSClientHello(hello *clientHelloMsg, session *SessionState,
 	if err := c.applyJLSClientHelloRandom(hello); err != nil {
 		return err
 	}
-	if c.config.jlsClientConfig() == nil {
+	if c.config.jlsConfig() == nil {
 		return nil
 	}
 
@@ -153,7 +165,7 @@ func (c *Conn) applyJLSClientHello(hello *clientHelloMsg, session *SessionState,
 }
 
 func (c *Conn) applyJLSClientHelloRandom(hello *clientHelloMsg) error {
-	cfg := c.config.jlsClientConfig()
+	cfg := c.config.jlsConfig()
 	if cfg == nil {
 		c.jlsState = jlsStateDisabled
 		return nil
@@ -189,7 +201,7 @@ func jlsClientHelloAuthData(hello *clientHelloMsg) ([]byte, error) {
 }
 
 func (c *Conn) authenticateJLSServerHello(serverHello *serverHelloMsg) error {
-	cfg := c.config.jlsClientConfig()
+	cfg := c.config.jlsConfig()
 	if cfg == nil {
 		c.jlsState = jlsStateDisabled
 		return nil
@@ -227,7 +239,7 @@ func jlsServerHelloAuthData(hello *serverHelloMsg) ([]byte, error) {
 }
 
 func (c *Conn) authenticateJLSClientHello(hello *clientHelloMsg) error {
-	cfg := c.config.jlsServerConfig()
+	cfg := c.config.jlsConfig()
 	if cfg == nil {
 		c.jlsState = jlsStateDisabled
 		return nil

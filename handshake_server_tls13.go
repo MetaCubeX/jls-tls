@@ -650,7 +650,7 @@ func (hs *serverHandshakeStateTLS13) doHelloRetryRequest(selectedGroup CurveID) 
 
 	// JLS BEGIN: authenticate rustls-jls's regenerated second ClientHello random.
 	allowRandomChange := false
-	if c.config.jlsServerConfig() != nil {
+	if c.config.jlsConfig() != nil {
 		if err := c.authenticateJLSClientHello(clientHello); err != nil {
 			return nil, err
 		}

@@ -1663,8 +1663,8 @@ func (c *Conn) connectionStateLocked() ConnectionState {
 	}
 	state.ECHAccepted = c.echAccepted
 	// JLS BEGIN: report authenticated ShadowQUIC JLS user through ConnectionState.
-	state.JLS.Authenticated = c.jlsAuthenticated()
-	if state.JLS.Authenticated {
+	state.JLS.Status = c.jlsStatus()
+	if state.JLS.Status == JLSAuthenticated {
 		state.JLS.User = c.jlsUser.Username
 	}
 	// JLS END

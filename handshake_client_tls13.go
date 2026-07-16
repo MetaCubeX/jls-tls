@@ -339,7 +339,7 @@ func (hs *clientHandshakeStateTLS13) processHelloRetryRequest() error {
 	}
 
 	// JLS BEGIN: rustls-jls regenerates authentication for the second ClientHello.
-	if c.config.jlsClientConfig() != nil {
+	if c.config.jlsConfig() != nil {
 		if err := c.applyJLSClientHelloRandom(hello); err != nil {
 			return err
 		}
