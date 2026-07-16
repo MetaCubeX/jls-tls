@@ -239,6 +239,12 @@ func (hs *serverHandshakeStateTLS13) processClientHello() error {
 		}
 	}
 	if clientKeyShare == nil {
+		// JLS BEGIN: JLS v3 does not permit HelloRetryRequest at any stage.
+		if c.jlsAuthenticated() {
+			c.jlsState = jlsStateAuthFailed
+			return fmt.Errorf("tls: jls client requires HelloRetryRequest: %w", errJLSAuthFailed)
+		}
+		// JLS END
 		ks, err := hs.doHelloRetryRequest(selectedGroup)
 		if err != nil {
 			return err
@@ -648,17 +654,7 @@ func (hs *serverHandshakeStateTLS13) doHelloRetryRequest(selectedGroup CurveID) 
 		return nil, errors.New("tls: client indicated early data in second ClientHello")
 	}
 
-	// JLS BEGIN: authenticate rustls-jls's regenerated second ClientHello random.
-	allowRandomChange := false
-	if c.config.jlsConfig() != nil {
-		if err := c.authenticateJLSClientHello(clientHello); err != nil {
-			return nil, err
-		}
-		allowRandomChange = c.jlsAuthenticated()
-	}
-	// JLS END
-
-	if illegalClientHelloChange(clientHello, hs.clientHello, allowRandomChange) {
+	if illegalClientHelloChange(clientHello, hs.clientHello) {
 		c.sendAlert(alertIllegalParameter)
 		return nil, errors.New("tls: client illegally modified second ClientHello")
 	}
@@ -671,7 +667,7 @@ func (hs *serverHandshakeStateTLS13) doHelloRetryRequest(selectedGroup CurveID) 
 // illegalClientHelloChange reports whether the two ClientHello messages are
 // different, with the exception of the changes allowed before and after a
 // HelloRetryRequest. See RFC 8446, Section 4.1.2.
-func illegalClientHelloChange(ch, ch1 *clientHelloMsg, allowRandomChange bool) bool {
+func illegalClientHelloChange(ch, ch1 *clientHelloMsg) bool {
 	if len(ch.supportedVersions) != len(ch1.supportedVersions) ||
 		len(ch.cipherSuites) != len(ch1.cipherSuites) ||
 		len(ch.supportedCurves) != len(ch1.supportedCurves) ||
@@ -711,7 +707,7 @@ func illegalClientHelloChange(ch, ch1 *clientHelloMsg, allowRandomChange bool) b
 		}
 	}
 	return ch.vers != ch1.vers ||
-		(!allowRandomChange && !bytes.Equal(ch.random, ch1.random)) ||
+		!bytes.Equal(ch.random, ch1.random) ||
 		!bytes.Equal(ch.sessionId, ch1.sessionId) ||
 		!bytes.Equal(ch.compressionMethods, ch1.compressionMethods) ||
 		ch.serverName != ch1.serverName ||

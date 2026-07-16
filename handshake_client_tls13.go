@@ -116,7 +116,11 @@ func (hs *clientHandshakeStateTLS13) handshake() error {
 	}
 
 	// JLS BEGIN: authenticate ShadowQUIC JLS ServerHello before hashing it.
-	if err := c.authenticateJLSServerHello(hs.serverHello); err != nil {
+	if c.didHRR {
+		// JLS v3 does not permit HelloRetryRequest at any stage. Continue as
+		// ordinary TLS and verify the camouflage certificate instead.
+		c.jlsState = jlsStateAuthFailed
+	} else if err := c.authenticateJLSServerHello(hs.serverHello); err != nil {
 		return err
 	}
 	// JLS END
@@ -337,14 +341,6 @@ func (hs *clientHandshakeStateTLS13) processHelloRetryRequest() error {
 		// Do not send the fallback ECDH key share in a HRR response.
 		hello.keyShares = hello.keyShares[:1]
 	}
-
-	// JLS BEGIN: rustls-jls regenerates authentication for the second ClientHello.
-	if c.config.jlsConfig() != nil {
-		if err := c.applyJLSClientHelloRandom(hello); err != nil {
-			return err
-		}
-	}
-	// JLS END
 
 	if len(hello.pskIdentities) > 0 {
 		pskSuite := cipherSuiteTLS13ByID(hs.session.cipherSuite)

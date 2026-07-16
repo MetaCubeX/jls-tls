@@ -256,65 +256,68 @@ func TestJLSAuthenticatedHandshakeSkipsCertificateVerification(t *testing.T) {
 
 func TestJLSHelloRetryRequest(t *testing.T) {
 	user := JLSUser{Username: "user", Password: "password"}
-	t.Run("full handshake", func(t *testing.T) {
+	t.Run("ordinary TLS fallback", func(t *testing.T) {
 		clientConfig := testConfig.Clone()
 		clientConfig.JLSConfig = &JLSConfig{Enable: true, User: user}
+		verifierCalled := false
+		clientConfig.VerifyConnection = func(state ConnectionState) error {
+			verifierCalled = true
+			if state.JLS.Status != JLSUnauthenticated {
+				return errors.New("HelloRetryRequest fallback reported authenticated JLS state")
+			}
+			return nil
+		}
 
 		serverConfig := testConfig.Clone()
 		serverConfig.CurvePreferences = []CurveID{CurveP256}
-		serverConfig.JLSConfig = &JLSConfig{Enable: true, Users: []JLSUser{user}}
 
 		serverState, clientState, err := testHandshake(t, clientConfig, serverConfig)
 		if err != nil {
 			t.Fatal(err)
 		}
 		if !serverState.HelloRetryRequest || !clientState.HelloRetryRequest {
-			t.Fatal("JLS handshake did not exercise HelloRetryRequest")
+			t.Fatal("ordinary TLS fallback did not exercise HelloRetryRequest")
 		}
-		if serverState.JLS.Status != JLSAuthenticated || serverState.JLS.User != user.Username {
-			t.Fatalf("server JLS state = %+v, want authenticated user %q", serverState.JLS, user.Username)
+		if !verifierCalled {
+			t.Fatal("HelloRetryRequest fallback skipped certificate verification")
 		}
-		if clientState.JLS.Status != JLSAuthenticated || clientState.JLS.User != user.Username {
-			t.Fatalf("client JLS state = %+v, want authenticated user %q", clientState.JLS, user.Username)
+		if clientState.JLS.Status != JLSUnauthenticated {
+			t.Fatalf("client JLS state = %+v, want unauthenticated", clientState.JLS)
 		}
 	})
 
-	t.Run("QUIC session resumption", func(t *testing.T) {
-		clientConfig := &QUICConfig{TLSConfig: testConfig.Clone()}
-		clientConfig.TLSConfig.MinVersion = VersionTLS13
-		clientConfig.TLSConfig.ClientSessionCache = NewLRUClientSessionCache(1)
-		clientConfig.TLSConfig.ServerName = "example.go.dev"
-		clientConfig.TLSConfig.JLSConfig = &JLSConfig{Enable: true, User: user}
+	t.Run("JLS server", func(t *testing.T) {
+		clientConn, serverConn := localPipe(t)
+		serverWriteCounter := &writeCountingConn{Conn: serverConn}
 
-		serverConfig := &QUICConfig{TLSConfig: testConfig.Clone()}
-		serverConfig.TLSConfig.MinVersion = VersionTLS13
-		serverConfig.TLSConfig.JLSConfig = &JLSConfig{Enable: true, Users: []JLSUser{user}}
+		clientConfig := testConfig.Clone()
+		clientConfig.JLSConfig = &JLSConfig{Enable: true, User: user}
+		clientDone := make(chan error, 1)
+		go func() {
+			clientDone <- Client(clientConn, clientConfig).Handshake()
+		}()
 
-		run := func() (*testQUICConn, *testQUICConn) {
-			client := newTestQUICClient(t, clientConfig)
-			client.conn.SetTransportParameters(nil)
-			server := newTestQUICServer(t, serverConfig)
-			server.conn.SetTransportParameters(nil)
-			if err := runTestQUICConnection(context.Background(), client, server, nil); err != nil {
-				t.Fatal(err)
-			}
-			return client, server
+		serverConfig := testConfig.Clone()
+		serverConfig.CurvePreferences = []CurveID{CurveP256}
+		serverConfig.JLSConfig = &JLSConfig{Enable: true, Users: []JLSUser{user}}
+		server := Server(serverWriteCounter, serverConfig)
+		serverErr := server.Handshake()
+		serverState := server.ConnectionState()
+		_ = serverConn.Close()
+		clientErr := <-clientDone
+		_ = clientConn.Close()
+
+		if !errors.Is(serverErr, ErrJLSAuthFailed) || clientErr == nil {
+			t.Fatalf("handshake errors: server=%v client=%v", serverErr, clientErr)
 		}
-
-		firstClient, _ := run()
-		if firstClient.conn.ConnectionState().DidResume {
-			t.Fatal("first JLS QUIC connection unexpectedly resumed")
+		if serverWriteCounter.numWrites != 0 {
+			t.Fatalf("JLS server wrote %d records before rejecting HelloRetryRequest", serverWriteCounter.numWrites)
 		}
-
-		serverConfig.TLSConfig.CurvePreferences = []CurveID{CurveP256}
-		secondClient, secondServer := run()
-		clientState := secondClient.conn.ConnectionState()
-		serverState := secondServer.conn.ConnectionState()
-		if !clientState.DidResume || !clientState.HelloRetryRequest || !serverState.HelloRetryRequest {
-			t.Fatalf("resumed HRR state: client=%+v server=%+v", clientState, serverState)
+		if serverState.HelloRetryRequest {
+			t.Fatal("JLS server reported HelloRetryRequest")
 		}
-		if clientState.JLS.Status != JLSAuthenticated || serverState.JLS.Status != JLSAuthenticated {
-			t.Fatalf("JLS authentication state: client=%+v server=%+v", clientState.JLS, serverState.JLS)
+		if serverState.JLS.Status != JLSUnauthenticated {
+			t.Fatalf("server JLS state = %+v, want unauthenticated", serverState.JLS)
 		}
 	})
 }
