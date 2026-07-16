@@ -223,6 +223,65 @@ func TestJLSTCPServerSuppressesUnauthenticatedAlerts(t *testing.T) {
 	}
 }
 
+func TestJLSTCPServerDiscardsAuthenticatedPreWriteFailure(t *testing.T) {
+	user := JLSUser{Username: "user", Password: "password"}
+	for _, test := range []struct {
+		name      string
+		configure func(*Config)
+	}{
+		{
+			name: "alert before server flight",
+			configure: func(config *Config) {
+				config.Certificates = nil
+			},
+		},
+		{
+			name: "error with buffered server flight",
+			configure: func(config *Config) {
+				config.KeyLogWriter = jlsFailingWriter{}
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			clientConn, serverConn := localPipe(t)
+			serverWriteCounter := &writeCountingConn{Conn: serverConn}
+
+			clientConfig := testConfig.Clone()
+			clientConfig.JLSConfig = &JLSConfig{Enable: true, User: user}
+			clientDone := make(chan error, 1)
+			go func() {
+				clientDone <- Client(clientConn, clientConfig).Handshake()
+			}()
+
+			serverConfig := testConfig.Clone()
+			serverConfig.JLSConfig = &JLSConfig{Enable: true, Users: []JLSUser{user}}
+			test.configure(serverConfig)
+			server := Server(serverWriteCounter, serverConfig)
+			serverErr := server.Handshake()
+			serverState := server.ConnectionState()
+			_ = serverConn.Close()
+			clientErr := <-clientDone
+			_ = clientConn.Close()
+
+			if serverErr == nil || clientErr == nil {
+				t.Fatalf("handshake errors: server=%v client=%v", serverErr, clientErr)
+			}
+			if serverWriteCounter.numWrites != 0 {
+				t.Fatalf("JLS server wrote %d records before fallback", serverWriteCounter.numWrites)
+			}
+			if serverState.JLS.Status != JLSAuthenticated {
+				t.Fatalf("server JLS state = %+v, want authenticated", serverState.JLS)
+			}
+		})
+	}
+}
+
+type jlsFailingWriter struct{}
+
+func (jlsFailingWriter) Write([]byte) (int, error) {
+	return 0, errors.New("jls test writer failed")
+}
+
 func TestJLSAuthenticatedHandshakeSkipsCertificateVerification(t *testing.T) {
 	user := JLSUser{Username: "user", Password: "password"}
 	clientConfig := testConfig.Clone()

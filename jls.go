@@ -87,9 +87,9 @@ func (c *Conn) jlsStatus() JLSStatus {
 	return JLSUnauthenticated
 }
 
-func (c *Conn) suppressJLSUnauthenticatedAlerts() bool {
+func (c *Conn) canFallbackJLS() bool {
 	cfg := c.config.jlsConfig()
-	return !c.isClient && c.quic == nil && cfg != nil && !c.jlsAuthenticated()
+	return !c.isClient && c.quic == nil && cfg != nil && c.bytesSent == 0
 }
 
 func jlsBuildFakeRandom(user JLSUser, random16, authData []byte) ([]byte, error) {

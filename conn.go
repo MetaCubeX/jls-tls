@@ -853,8 +853,8 @@ func (c *Conn) sendAlertLocked(err alert) error {
 	if c.quic != nil {
 		return c.out.setErrorLocked(&net.OpError{Op: "local error", Err: err})
 	}
-	// JLS BEGIN: keep unauthenticated TCP handshakes silent for transparent fallback.
-	if c.suppressJLSUnauthenticatedAlerts() {
+	// JLS BEGIN: keep pre-write TCP handshake failures silent for transparent fallback.
+	if c.canFallbackJLS() {
 		if err == alertCloseNotify {
 			return nil
 		}
@@ -1581,9 +1581,16 @@ func (c *Conn) handshakeContext(ctx context.Context) (ret error) {
 	if c.handshakeErr == nil {
 		c.handshakes++
 	} else {
-		// If an error occurred during the handshake try to flush the
-		// alert that might be left in the buffer.
-		c.flush()
+		// JLS BEGIN: do not commit a buffered server flight when fallback is still possible.
+		if c.canFallbackJLS() {
+			c.sendBuf = nil
+			c.buffering = false
+		} else {
+			// If an error occurred during the handshake try to flush the
+			// alert that might be left in the buffer.
+			c.flush()
+		}
+		// JLS END
 	}
 
 	if c.handshakeErr == nil && !c.isHandshakeComplete.Load() {
