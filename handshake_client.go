@@ -402,7 +402,10 @@ func (c *Conn) loadSession(hello *clientHelloMsg) (
 		c.config.ClientSessionCache.Put(cacheKey, nil)
 		return nil, nil, nil, nil
 	}
-	if !c.config.InsecureSkipVerify {
+	// JLS BEGIN: JLS-authenticated sessions intentionally have no verified camouflage chain.
+	jlsAuthenticatedSession := c.canResumeJLSAuthenticatedSession(session)
+	// JLS END
+	if !c.config.InsecureSkipVerify && !jlsAuthenticatedSession {
 		if len(session.verifiedChains) == 0 {
 			// The original connection had InsecureSkipVerify, while this doesn't.
 			return nil, nil, nil, nil

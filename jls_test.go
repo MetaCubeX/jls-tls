@@ -112,6 +112,225 @@ func TestJLSHandshake(t *testing.T) {
 	}
 }
 
+func TestJLSQUICEarlyDataResumption(t *testing.T) {
+	user := JLSUser{Username: "user", Password: "password"}
+	clientConfig := &QUICConfig{TLSConfig: testConfig.Clone()}
+	clientConfig.TLSConfig.MinVersion = VersionTLS13
+	clientConfig.TLSConfig.ClientSessionCache = NewLRUClientSessionCache(1)
+	clientConfig.TLSConfig.ServerName = "camouflage.example"
+	clientConfig.TLSConfig.NextProtos = []string{"h3"}
+	clientConfig.TLSConfig.InsecureSkipVerify = false
+	clientConfig.TLSConfig.JLSConfig = &JLSConfig{Enable: true, User: user}
+
+	serverConfig := &QUICConfig{TLSConfig: testConfig.Clone()}
+	serverConfig.TLSConfig.MinVersion = VersionTLS13
+	serverConfig.TLSConfig.NextProtos = []string{"h3"}
+	serverConfig.TLSConfig.JLSConfig = &JLSConfig{
+		Enable:     true,
+		Users:      []JLSUser{user},
+		ServerName: clientConfig.TLSConfig.ServerName,
+	}
+
+	client := newTestQUICClient(t, clientConfig)
+	client.conn.SetTransportParameters(nil)
+	server := newTestQUICServer(t, serverConfig)
+	server.conn.SetTransportParameters(nil)
+	server.ticketOpts.EarlyData = true
+	if err := runTestQUICConnection(context.Background(), client, server, nil); err != nil {
+		t.Fatalf("first JLS handshake failed: %v", err)
+	}
+
+	cache := clientConfig.TLSConfig.ClientSessionCache.(*lruSessionCache)
+	session := cache.q.Front().Value.(*lruSessionCacheEntry).state.session
+	if len(session.verifiedChains) != 0 {
+		t.Fatal("JLS camouflage certificate unexpectedly produced a verified chain")
+	}
+	if !client.conn.conn.canResumeJLSAuthenticatedSession(session) {
+		t.Fatal("authenticated JLS session was not marked for resumption")
+	}
+	otherServerConfig := clientConfig.TLSConfig.Clone()
+	otherServerConfig.ServerName = "other.example"
+	if (&Conn{config: otherServerConfig}).canResumeJLSAuthenticatedSession(session) {
+		t.Fatal("authenticated JLS session was accepted under a different cache key")
+	}
+	tls12Session := *session
+	tls12Session.version = VersionTLS12
+	if client.conn.conn.canResumeJLSAuthenticatedSession(&tls12Session) {
+		t.Fatal("authenticated JLS marker was accepted for a TLS 1.2 session")
+	}
+	serverSession := *session
+	serverSession.isClient = false
+	if client.conn.conn.canResumeJLSAuthenticatedSession(&serverSession) {
+		t.Fatal("authenticated JLS marker was accepted for a server session")
+	}
+
+	client = newTestQUICClient(t, clientConfig)
+	client.conn.SetTransportParameters(nil)
+	server = newTestQUICServer(t, serverConfig)
+	server.conn.SetTransportParameters(nil)
+	if err := runTestQUICConnection(context.Background(), client, server, nil); err != nil {
+		t.Fatalf("resumed JLS handshake failed: %v", err)
+	}
+	if state := client.conn.ConnectionState(); !state.DidResume || state.JLS.Status != JLSAuthenticated {
+		t.Fatalf("resumed client state = %+v, want authenticated JLS resumption", state)
+	}
+	if client.writeSecret[QUICEncryptionLevelEarly].secret == nil {
+		t.Fatal("resumed JLS client did not receive an early data write secret")
+	}
+	if server.readSecret[QUICEncryptionLevelEarly].secret == nil {
+		t.Fatal("resumed JLS server did not receive an early data read secret")
+	}
+
+	otherUser := JLSUser{Username: "other", Password: "other-password"}
+	clientConfig.TLSConfig.JLSConfig.User = otherUser
+	serverConfig.TLSConfig.JLSConfig.Users = append(serverConfig.TLSConfig.JLSConfig.Users, otherUser)
+	client = newTestQUICClient(t, clientConfig)
+	client.conn.SetTransportParameters(nil)
+	server = newTestQUICServer(t, serverConfig)
+	server.conn.SetTransportParameters(nil)
+	if err := runTestQUICConnection(context.Background(), client, server, nil); err != nil {
+		t.Fatalf("JLS handshake after changing credentials failed: %v", err)
+	}
+	if state := client.conn.ConnectionState(); state.DidResume || state.JLS.User != otherUser.Username {
+		t.Fatalf("client state = %+v, want a full JLS handshake as %q", state, otherUser.Username)
+	}
+}
+
+func TestJLSTCPResumption(t *testing.T) {
+	user := JLSUser{Username: "user", Password: "password"}
+	clientConfig := testConfig.Clone()
+	clientConfig.MinVersion = VersionTLS13
+	clientConfig.ClientSessionCache = NewLRUClientSessionCache(1)
+	clientConfig.ServerName = "camouflage.example"
+	clientConfig.InsecureSkipVerify = false
+	clientConfig.JLSConfig = &JLSConfig{Enable: true, User: user}
+
+	serverConfig := testConfig.Clone()
+	serverConfig.MinVersion = VersionTLS13
+	serverConfig.JLSConfig = &JLSConfig{
+		Enable:     true,
+		Users:      []JLSUser{user},
+		ServerName: clientConfig.ServerName,
+	}
+
+	_, clientState, err := testHandshake(t, clientConfig, serverConfig)
+	if err != nil {
+		t.Fatalf("first JLS TCP handshake failed: %v", err)
+	}
+	if clientState.DidResume {
+		t.Fatal("first JLS TCP handshake unexpectedly resumed")
+	}
+
+	cache := clientConfig.ClientSessionCache.(*lruSessionCache)
+	session := cache.q.Front().Value.(*lruSessionCacheEntry).state.session
+	if len(session.verifiedChains) != 0 {
+		t.Fatal("JLS TCP camouflage certificate unexpectedly produced a verified chain")
+	}
+	if !(&Conn{config: clientConfig}).canResumeJLSAuthenticatedSession(session) {
+		t.Fatal("authenticated JLS TCP session was not marked for resumption")
+	}
+
+	_, clientState, err = testHandshake(t, clientConfig, serverConfig)
+	if err != nil {
+		t.Fatalf("resumed JLS TCP handshake failed: %v", err)
+	}
+	if !clientState.DidResume || clientState.JLS.Status != JLSAuthenticated {
+		t.Fatalf("resumed client state = %+v, want authenticated JLS TCP resumption", clientState)
+	}
+}
+
+func TestJLSTLS12FallbackSessionIsUnmarked(t *testing.T) {
+	user := JLSUser{Username: "user", Password: "password"}
+	clientConfig := testConfig.Clone()
+	clientConfig.MinVersion = VersionTLS12
+	clientConfig.MaxVersion = VersionTLS12
+	clientConfig.ClientSessionCache = NewLRUClientSessionCache(1)
+	clientConfig.ServerName = "camouflage.example"
+	clientConfig.JLSConfig = &JLSConfig{Enable: true, User: user}
+
+	serverConfig := testConfig.Clone()
+	serverConfig.MinVersion = VersionTLS12
+	serverConfig.MaxVersion = VersionTLS12
+	serverConfig.JLSConfig = &JLSConfig{
+		Enable:     true,
+		Users:      []JLSUser{user},
+		ServerName: clientConfig.ServerName,
+	}
+
+	_, clientState, err := testHandshake(t, clientConfig, serverConfig)
+	if err != nil {
+		t.Fatalf("first TLS 1.2 fallback handshake failed: %v", err)
+	}
+	if clientState.DidResume || clientState.JLS.Status != JLSUnauthenticated {
+		t.Fatalf("first client state = %+v, want unresumed TLS 1.2 fallback", clientState)
+	}
+
+	cache := clientConfig.ClientSessionCache.(*lruSessionCache)
+	session := cache.q.Front().Value.(*lruSessionCacheEntry).state.session
+	if (&Conn{config: clientConfig}).canResumeJLSAuthenticatedSession(session) {
+		t.Fatal("TLS 1.2 fallback session was marked as JLS-authenticated")
+	}
+
+	_, clientState, err = testHandshake(t, clientConfig, serverConfig)
+	if err != nil {
+		t.Fatalf("resumed TLS 1.2 fallback handshake failed: %v", err)
+	}
+	if !clientState.DidResume || clientState.JLS.Status != JLSUnauthenticated {
+		t.Fatalf("resumed client state = %+v, want ordinary TLS 1.2 fallback resumption", clientState)
+	}
+}
+
+func TestJLSDoesNotTrustUnmarkedSession(t *testing.T) {
+	user := JLSUser{Username: "user", Password: "password"}
+	clientConfig := &QUICConfig{TLSConfig: testConfig.Clone()}
+	clientConfig.TLSConfig.MinVersion = VersionTLS13
+	clientConfig.TLSConfig.ClientSessionCache = NewLRUClientSessionCache(1)
+	clientConfig.TLSConfig.ServerName = "example.go.dev"
+	clientConfig.TLSConfig.NextProtos = []string{"h3"}
+	clientConfig.TLSConfig.InsecureSkipVerify = true
+
+	serverConfig := &QUICConfig{TLSConfig: testConfig.Clone()}
+	serverConfig.TLSConfig.MinVersion = VersionTLS13
+	serverConfig.TLSConfig.NextProtos = []string{"h3"}
+
+	client := newTestQUICClient(t, clientConfig)
+	client.conn.SetTransportParameters(nil)
+	server := newTestQUICServer(t, serverConfig)
+	server.conn.SetTransportParameters(nil)
+	server.ticketOpts.EarlyData = true
+	if err := runTestQUICConnection(context.Background(), client, server, nil); err != nil {
+		t.Fatalf("ordinary TLS handshake failed: %v", err)
+	}
+
+	cache := clientConfig.TLSConfig.ClientSessionCache.(*lruSessionCache)
+	session := cache.q.Front().Value.(*lruSessionCacheEntry).state.session
+	if len(session.verifiedChains) != 0 {
+		t.Fatal("insecure ordinary TLS session unexpectedly produced a verified chain")
+	}
+	if client.conn.conn.canResumeJLSAuthenticatedSession(session) {
+		t.Fatal("ordinary TLS session was marked as JLS-authenticated")
+	}
+
+	clientConfig.TLSConfig.InsecureSkipVerify = false
+	clientConfig.TLSConfig.JLSConfig = &JLSConfig{Enable: true, User: user}
+	serverConfig.TLSConfig.JLSConfig = &JLSConfig{
+		Enable:     true,
+		Users:      []JLSUser{user},
+		ServerName: clientConfig.TLSConfig.ServerName,
+	}
+
+	client = newTestQUICClient(t, clientConfig)
+	client.conn.SetTransportParameters(nil)
+	server = newTestQUICServer(t, serverConfig)
+	server.conn.SetTransportParameters(nil)
+	if err := runTestQUICConnection(context.Background(), client, server, nil); err != nil {
+		t.Fatalf("JLS handshake after ordinary TLS session failed: %v", err)
+	}
+	if state := client.conn.ConnectionState(); state.DidResume || state.JLS.Status != JLSAuthenticated {
+		t.Fatalf("client state = %+v, want a full authenticated JLS handshake", state)
+	}
+}
+
 func TestJLSAuthenticationFailure(t *testing.T) {
 	user := JLSUser{Username: "user", Password: "password"}
 	for _, test := range []struct {

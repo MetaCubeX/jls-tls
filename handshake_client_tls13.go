@@ -887,6 +887,9 @@ func (c *Conn) handleNewSessionTicket(msg *newSessionTicketMsgTLS13) error {
 
 	session := c.sessionState()
 	session.secret = psk
+	// JLS BEGIN: bind the authenticated JLS identity to this ticket's PSK.
+	c.markJLSAuthenticatedSession(session)
+	// JLS END
 	session.useBy = uint64(c.config.time().Add(lifetime).Unix())
 	session.ageAdd = msg.ageAdd
 	session.EarlyData = c.quic != nil && msg.maxEarlyData == 0xffffffff // RFC 9001, Section 4.6.1

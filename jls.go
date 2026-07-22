@@ -3,6 +3,7 @@ package tls
 import (
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/binary"
 	"errors"
@@ -54,11 +55,12 @@ const (
 )
 
 const (
-	jlsHandshakeHeaderLen    = 4 // uint8 message type and uint24 message length
-	jlsHelloLegacyVersionLen = 2
-	jlsHelloRandomLen        = 32
-	jlsHelloRandomOffset     = jlsHandshakeHeaderLen + jlsHelloLegacyVersionLen
-	jlsRandomSeedLen         = jlsHelloRandomLen / 2
+	jlsHandshakeHeaderLen              = 4 // uint8 message type and uint24 message length
+	jlsHelloLegacyVersionLen           = 2
+	jlsHelloRandomLen                  = 32
+	jlsHelloRandomOffset               = jlsHandshakeHeaderLen + jlsHelloLegacyVersionLen
+	jlsRandomSeedLen                   = jlsHelloRandomLen / 2
+	jlsAuthenticatedSessionExtraPrefix = "jls-tls\x00\x01authenticated\x00"
 )
 
 // ErrJLSAuthFailed is returned when ShadowQUIC JLS authentication fails.
@@ -75,6 +77,45 @@ func (c *Config) jlsConfig() *JLSConfig {
 
 func (c *Conn) jlsAuthenticated() bool {
 	return c.jlsState == jlsStateAuthSuccess
+}
+
+func (c *Conn) markJLSAuthenticatedSession(session *SessionState) {
+	cfg := c.config.jlsConfig()
+	if c.jlsAuthenticated() && cfg != nil {
+		session.Extra = append(
+			session.Extra,
+			jlsAuthenticatedSessionExtra(session, cfg.User, c.clientSessionCacheKey()),
+		)
+	}
+}
+
+func (c *Conn) canResumeJLSAuthenticatedSession(session *SessionState) bool {
+	cfg := c.config.jlsConfig()
+	if cfg == nil || !session.isClient || session.version != VersionTLS13 {
+		return false
+	}
+	want := jlsAuthenticatedSessionExtra(session, cfg.User, c.clientSessionCacheKey())
+	for _, extra := range session.Extra {
+		if hmac.Equal(extra, want) {
+			return true
+		}
+	}
+	return false
+}
+
+func jlsAuthenticatedSessionExtra(session *SessionState, user JLSUser, sessionKey string) []byte {
+	// Key the local marker with the ticket PSK and bind it to the JLS identity
+	// and cache key, preserving loadSession's cross-server cache protection.
+	// Password material stays out of persistent metadata to avoid an offline verifier.
+	mac := hmac.New(sha256.New, session.secret)
+	mac.Write([]byte(jlsAuthenticatedSessionExtraPrefix))
+	var lengths [8]byte
+	binary.BigEndian.PutUint32(lengths[:4], uint32(len(user.Username)))
+	binary.BigEndian.PutUint32(lengths[4:], uint32(len(sessionKey)))
+	mac.Write(lengths[:])
+	mac.Write([]byte(user.Username))
+	mac.Write([]byte(sessionKey))
+	return append([]byte(jlsAuthenticatedSessionExtraPrefix), mac.Sum(nil)...)
 }
 
 func (c *Conn) jlsStatus() JLSStatus {
