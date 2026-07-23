@@ -1,12 +1,14 @@
 package tls
 
 import (
+	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/binary"
 	"errors"
+	"io"
 )
 
 // JLS BEGIN: ShadowQUIC JLS authentication and camouflage support.
@@ -133,7 +135,7 @@ func (c *Conn) canFallbackJLS() bool {
 	return !c.isClient && c.quic == nil && cfg != nil && c.bytesSent == 0
 }
 
-func jlsBuildFakeRandom(user JLSUser, random16, authData []byte) ([]byte, error) {
+func jlsBuildFakeRandom(user JLSUser, random16, authData []byte, random io.Reader) ([]byte, error) {
 	if len(random16) != jlsRandomSeedLen {
 		return nil, errors.New("tls: jls random seed must be 16 bytes")
 	}
@@ -155,7 +157,29 @@ func jlsBuildFakeRandom(user JLSUser, random16, authData []byte) ([]byte, error)
 	if err != nil {
 		return nil, err
 	}
-	return aead.Seal(nil, nonce, random16, nil), nil
+	seed := append([]byte(nil), random16...)
+	// JLS v3 reserves the TLS downgrade canaries and the HRR random suffix.
+	// Regenerate N instead of emitting a FakeRandom ending in one of them.
+	for {
+		fakeRandom := aead.Seal(nil, nonce, seed, nil)
+		if !jlsHasForbiddenRandomSuffix(fakeRandom) {
+			return fakeRandom, nil
+		}
+		if _, err := io.ReadFull(random, seed); err != nil {
+			return nil, err
+		}
+	}
+}
+
+func jlsHasForbiddenRandomSuffix(random []byte) bool {
+	const suffixLen = len(downgradeCanaryTLS12)
+	if len(random) < suffixLen {
+		return false
+	}
+	suffix := random[len(random)-suffixLen:]
+	return string(suffix) == downgradeCanaryTLS12 ||
+		string(suffix) == downgradeCanaryTLS11 ||
+		bytes.Equal(suffix, helloRetryRequestRandom[len(helloRetryRequestRandom)-suffixLen:])
 }
 
 func jlsCheckFakeRandom(user JLSUser, fakeRandom, authData []byte) bool {
@@ -223,7 +247,7 @@ func (c *Conn) applyJLSClientHelloRandom(hello *clientHelloMsg) error {
 	if err != nil {
 		return err
 	}
-	fakeRandom, err := jlsBuildFakeRandom(cfg.User, hello.random[:jlsRandomSeedLen], authData)
+	fakeRandom, err := jlsBuildFakeRandom(cfg.User, hello.random[:jlsRandomSeedLen], authData, c.config.rand())
 	if err != nil {
 		return err
 	}

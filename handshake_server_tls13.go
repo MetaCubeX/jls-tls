@@ -732,7 +732,7 @@ func (hs *serverHandshakeStateTLS13) sendServerParameters() error {
 			c.sendAlert(alertInternalError)
 			return err
 		}
-		fakeRandom, err := jlsBuildFakeRandom(c.jlsUser, hs.hello.random[:16], authData)
+		fakeRandom, err := jlsBuildFakeRandom(c.jlsUser, hs.hello.random[:16], authData, c.config.rand())
 		if err != nil {
 			c.sendAlert(alertInternalError)
 			return err

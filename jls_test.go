@@ -8,6 +8,22 @@ import (
 	"testing"
 )
 
+func TestJLSForbiddenRandomSuffix(t *testing.T) {
+	for _, suffix := range [][]byte{
+		[]byte(downgradeCanaryTLS12),
+		[]byte(downgradeCanaryTLS11),
+		helloRetryRequestRandom[len(helloRetryRequestRandom)-len(downgradeCanaryTLS12):],
+	} {
+		random := append(make([]byte, jlsHelloRandomLen-len(suffix)), suffix...)
+		if !jlsHasForbiddenRandomSuffix(random) {
+			t.Fatalf("JLS accepted forbidden random suffix %x", suffix)
+		}
+	}
+	if jlsHasForbiddenRandomSuffix(make([]byte, jlsHelloRandomLen)) {
+		t.Fatal("JLS rejected an ordinary random suffix")
+	}
+}
+
 func TestJLSServerHelloAuthDataUsesWireEncoding(t *testing.T) {
 	hello := testJLSServerHello()
 	for i := range hello.random {
