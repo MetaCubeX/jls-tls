@@ -374,6 +374,12 @@ func (m *clientHelloMsg) marshalMsg(echInner bool) ([]byte, error) {
 }
 
 func (m *clientHelloMsg) marshal() ([]byte, error) {
+	// A ClientHello adopted from wire bytes (the prebuilt/uTLS path) must be
+	// sent verbatim: field re-marshaling drops GREASE, unknown extensions and
+	// the original extension order, breaking both the transcript and JLS AD.
+	if m.original != nil {
+		return m.original, nil
+	}
 	return m.marshalMsg(false)
 }
 

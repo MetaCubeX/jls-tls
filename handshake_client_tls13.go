@@ -243,6 +243,14 @@ func (hs *clientHandshakeStateTLS13) sendDummyChangeCipherSpec() error {
 func (hs *clientHandshakeStateTLS13) processHelloRetryRequest() error {
 	c := hs.c
 
+	// A prebuilt ClientHello must be sent verbatim; HRR would require changing
+	// the key_share/cookie and re-sealing JLS random over a second hello. v1
+	// does not implement that, so fail explicitly instead of sending stale
+	// bytes (marshal returns the original raw bytes once it is set).
+	if c.quic != nil && c.quic.clientHello != nil {
+		return errors.New("tls: prebuilt QUIC ClientHello does not support HelloRetryRequest")
+	}
+
 	// The first ClientHello gets double-hashed into the transcript upon a
 	// HelloRetryRequest. (The idea is that the server might offload transcript
 	// storage to the client in the cookie.) See RFC 8446, Section 4.4.1.

@@ -243,7 +243,20 @@ func (c *Conn) applyJLSClientHelloRandom(hello *clientHelloMsg) error {
 	}
 	c.jlsState = jlsStateNotAuthed
 
-	authData, err := jlsClientHelloAuthData(hello)
+	// When the ClientHello came from raw wire bytes (the prebuilt/uTLS
+	// path), its wire encoding is authoritative. Re-marshaling from fields
+	// mirrors the raw-AD handling in github.com/metacubex/utls/jls.go
+	// (BSD-3-Clause, the uTLS Authors).
+	// would drop GREASE/unknown extensions and reorder extensions, so the
+	// client would derive a different AD than the server, which zeroes the
+	// random in the received raw bytes.
+	var authData []byte
+	var err error
+	if hello.original != nil {
+		authData, err = jlsClientHelloWireAuthData(hello)
+	} else {
+		authData, err = jlsClientHelloAuthData(hello)
+	}
 	if err != nil {
 		return err
 	}
@@ -252,6 +265,12 @@ func (c *Conn) applyJLSClientHelloRandom(hello *clientHelloMsg) error {
 		return err
 	}
 	hello.random = fakeRandom
+	if hello.original != nil {
+		if len(hello.original) < jlsHelloRandomOffset+jlsHelloRandomLen {
+			return errors.New("tls: jls prebuilt client hello too short")
+		}
+		copy(hello.original[jlsHelloRandomOffset:jlsHelloRandomOffset+jlsHelloRandomLen], fakeRandom)
+	}
 	return nil
 }
 

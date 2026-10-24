@@ -37,6 +37,9 @@ type clientHandshakeState struct {
 }
 
 func (c *Conn) makeClientHello() (*clientHelloMsg, *keySharePrivateKeys, *echClientContext, error) {
+	if c.quic != nil && c.quic.clientHello != nil {
+		return c.makeRawClientHello(c.quic.clientHello)
+	}
 	config := c.config
 	if len(config.ServerName) == 0 && !config.InsecureSkipVerify {
 		return nil, nil, nil, errors.New("tls: either ServerName or InsecureSkipVerify must be specified in the tls.Config")
@@ -351,6 +354,11 @@ func (c *Conn) clientHandshake(ctx context.Context) (err error) {
 
 func (c *Conn) loadSession(hello *clientHelloMsg) (
 	session *SessionState, earlySecret *tls13EarlySecret, binderKey []byte, err error) {
+	// A prebuilt ClientHello is a fresh, PSK-less message. Adding a session
+	// ticket or PSK would change its wire bytes after the caller built them.
+	if c.quic != nil && c.quic.clientHello != nil {
+		return nil, nil, nil, nil
+	}
 	if c.config.SessionTicketsDisabled || c.config.ClientSessionCache == nil {
 		return nil, nil, nil, nil
 	}

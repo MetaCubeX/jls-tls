@@ -6,6 +6,7 @@ package tls
 
 import (
 	"context"
+	"crypto/ecdh"
 	"errors"
 	"fmt"
 	"net"
@@ -47,9 +48,36 @@ type QUICConn struct {
 	sessionTicketSent bool
 }
 
+// RawClientHello supplies a prebuilt QUIC ClientHello for a client
+// connection. It is an advanced, opt-in API: the caller is responsible for
+// producing a well-formed TLS 1.3 ClientHello whose key shares match the
+// supplied private keys and whose quic_transport_parameters extension matches
+// the parameters passed to [QUICConn.SetTransportParameters].
+type RawClientHello struct {
+	// Raw is the complete TLS ClientHello handshake message, including the
+	// 4-byte handshake header.
+	Raw []byte
+
+	// ECDHE is the private key for the X25519 key share.
+	ECDHE *ecdh.PrivateKey
+
+	// HybridECDHE is the X25519 private key used in the X25519MLKEM768 key
+	// share when it differs from ECDHE (as it does for Chrome/uTLS).
+	HybridECDHE *ecdh.PrivateKey
+
+	// MLKEMSeed is the 64-byte decapsulation key seed (d || z) for the
+	// ML-KEM-768 component of the X25519MLKEM768 key share.
+	MLKEMSeed []byte
+}
+
 // A QUICConfig configures a [QUICConn].
 type QUICConfig struct {
 	TLSConfig *Config
+
+	// ClientHello, if non-nil, supplies a prebuilt ClientHello for client
+	// connections instead of generating one. It is ignored for server
+	// connections. See [RawClientHello] for the caller's responsibilities.
+	ClientHello *RawClientHello
 
 	// EnableSessionEvents may be set to true to enable the
 	// [QUICStoreSession] and [QUICResumeSession] events for client connections.
@@ -179,6 +207,8 @@ type quicState struct {
 
 	transportParams []byte // to send to the peer
 
+	clientHello *RawClientHello
+
 	enableSessionEvents bool
 	clientHelloInfoConn net.Conn
 }
@@ -199,6 +229,7 @@ func newQUICConn(conn *Conn, config *QUICConfig) *QUICConn {
 	conn.quic = &quicState{
 		signalc:             make(chan struct{}),
 		blockedc:            make(chan struct{}),
+		clientHello:         config.ClientHello,
 		enableSessionEvents: config.EnableSessionEvents,
 		clientHelloInfoConn: config.ClientHelloInfoConn,
 	}

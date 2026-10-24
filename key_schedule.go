@@ -51,7 +51,11 @@ func (c *cipherSuiteTLS13) exportKeyingMaterial(s *tls13MasterSecret, transcript
 
 type keySharePrivateKeys struct {
 	ecdhe *ecdh.PrivateKey
-	mlkem mlkem.Decapsulator
+	// mlkemEcdhe is the X25519 key used inside the X25519MLKEM768 share when
+	// it differs from ecdhe, as it does for Chrome/uTLS. The standard crypto/tls
+	// path reuses ecdhe for both shares, so mlkemEcdhe is normally nil.
+	mlkemEcdhe *ecdh.PrivateKey
+	mlkem      mlkem.Decapsulator
 }
 
 // A keyExchange implements a TLS 1.3 KEM.
@@ -140,11 +144,15 @@ func (ke *ecdhKeyExchange) serverSharedSecret(rand io.Reader, clientKeyShare []b
 }
 
 func (ke *ecdhKeyExchange) clientSharedSecret(priv *keySharePrivateKeys, serverKeyShare []byte) ([]byte, error) {
+	return ke.clientSharedSecretWithKey(priv.ecdhe, serverKeyShare)
+}
+
+func (ke *ecdhKeyExchange) clientSharedSecretWithKey(priv *ecdh.PrivateKey, serverKeyShare []byte) ([]byte, error) {
 	peerKey, err := ke.curve.NewPublicKey(serverKeyShare)
 	if err != nil {
 		return nil, err
 	}
-	sharedKey, err := priv.ecdhe.ECDH(peerKey)
+	sharedKey, err := priv.ECDH(peerKey)
 	if err != nil {
 		return nil, err
 	}
@@ -233,7 +241,11 @@ func (ke *hybridKeyExchange) clientSharedSecret(priv *keySharePrivateKeys, serve
 		ecdhShareData = serverKeyShare[:ke.ecdhElementSize]
 		mlkemShareData = serverKeyShare[ke.ecdhElementSize:]
 	}
-	ecdhSharedSecret, err := ke.ecdh.clientSharedSecret(priv, ecdhShareData)
+	ecdhKey := priv.ecdhe
+	if priv.mlkemEcdhe != nil {
+		ecdhKey = priv.mlkemEcdhe
+	}
+	ecdhSharedSecret, err := ke.ecdh.clientSharedSecretWithKey(ecdhKey, ecdhShareData)
 	if err != nil {
 		return nil, err
 	}
